@@ -8,15 +8,11 @@ import (
 	"strings"
 	"testing"
 )
-func checkError(t *testing.T, err error){
-    if err != nil {
-        t.Error(fmt.Sprintf("Error occurred: %s", err.Error())) // t.Error is visible when running `go test -verbose`
-    }
-}
 
 func TestTCPExtended(t *testing.T) {
 	name := "hello.txt"
 	contents := "hello \r\n world"
+	//fmt.Println(name, contents)
 	exptime := 300000
 	conn, err := net.Dial("tcp", "localhost:8080")
 	if err != nil {

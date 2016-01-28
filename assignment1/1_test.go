@@ -9,6 +9,11 @@ import (
 	"testing"
 	"time"
 )
+func checkError(t *testing.T, err error){
+    if err != nil {
+        t.Error(fmt.Sprintf("Error occurred: %s", err.Error())) // t.Error is visible when running `go test -verbose`
+    }
+}
 
 
 // Simple serial check of getting and setting
