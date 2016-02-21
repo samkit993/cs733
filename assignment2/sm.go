@@ -1,4 +1,4 @@
-package main
+package assignment2
 import (
 	"fmt"
 	"sort"
@@ -42,101 +42,82 @@ type LogEntry struct{
 	term int
 	data []byte
 }
+type Log []LogEntry
+type MapIntInt map[int]int
+type IntArray []int
+type MapIntBool map[int]bool
+
+func (le LogEntry) String() string{
+	return fmt.Sprintf("%v:%v", le.term, string(le.data))
+}
+func (log Log) String() string{
+	str := "["
+	for _, le := range log {
+		str += fmt.Sprintf("%v:%v", le.term, string(le.data))
+	}
+	str += "]"
+	return str
+}
+
+func (mapii MapIntInt) String() string{
+	str := "[ "
+	for key, val := range mapii{
+		str += fmt.Sprintf("%v:%v ", key, val)
+	}
+	str += "]"
+	return str
+}
+
+func (ia IntArray) String() string{
+	str := "["
+	for _, val := range ia{
+		str += fmt.Sprintf("%v ", val)
+	}
+	str += "]"
+	return str
+}
+func (mapib MapIntBool) String() string{
+	str := "["
+	for _, val := range mapib{
+		str += fmt.Sprintf("%v ", val)
+	}
+	str += "]"
+	return str
+}
 
 type StateMachine struct{
 	id int
 	currTerm int
 	votedFor int
-	log []LogEntry
+	log Log
 	commitIndex int
 	lastApplied int
-	nextIndex map[int]int
-	matchIndex map[int]int
-	lastSent map[int]int
+	nextIndex MapIntInt
+	matchIndex MapIntInt
+	lastSent MapIntInt
 	state State				//0: Follower	1:Candidate		2:Leader
-	votes map[int]bool					//Relevant to candidate state
-	peers []int
+	votes MapIntBool
+	peers IntArray
 	majorityCount int
 }
-
-type Event interface {
-
+func (sm *StateMachine) String() string{
+	s := fmt.Sprintf("StateMachine:id(%v) currTerm(%v) votedFor(%v) state(%v)\n", sm.id, sm.currTerm, sm.votedFor, sm.state)
+	s += fmt.Sprintf("            :commitIndex(%v) lastApplied(%v) majorityCount(%v)\n", sm.commitIndex, sm.lastApplied, sm.majorityCount)
+	s += fmt.Sprintf("            :peers(%v) log(%v)\n", sm.peers, sm.log)
+	s += fmt.Sprintf("            :nextIndex(%v) matchIndex(%v)\n", sm.nextIndex, sm.matchIndex)
+	s += fmt.Sprintf("            :lastSent(%v) votes(%v)\n", sm.lastSent, sm.votes)
+	return s
 }
 
-//6 Events
-type TimeoutEv struct{
-
-}
-
-type AppendEntriesReqEv struct {
-	term int
-	leaderId int
-	prevLogIndex int
-	prevLogTerm int
-	entries []LogEntry
-	leaderCommit int
-}
-
-type AppendEntriesRespEv struct {
-	term int
-	success bool
-}
-
-type VoteReqEv struct {
-	term int
-	candidateId int
-	lastLogIndex int
-	lastLogTerm int
-}
-
-type VoteRespEv struct {
-	term int
-	voteGranted bool
-}
-
-type AppendEv struct {
-	data []byte
-}
-//4 Actions
-type Action interface {
-
-}
-type Send struct {
-	peerId int
-	event Event
-}
-
-type Commit struct {
-	index int
-	data []byte
-	err error
-}
-func (c Commit) String() string{
-	return fmt.Sprintf("Commit:idx(%i) data(%v) error(%v)",c.index, c.data, c.err)
-}
-
-type Alarm struct {
-	duration int		//Time.Miliseconds
-}
-func (a Alarm) String() string{
-	return fmt.Sprintf("Alarm:duration(%i)",a.duration)
-}
-
-type LogStore struct {
-	index int
-	data []byte
-}
-
-func (l LogStore) String() string{
-	return fmt.Sprintf("LogStore:idx(%i) data(%v)",l.index, l.data)
-}
 /*	This is required to communicate command across network from one node to another node.
  *	Most probably, it is not required in this assignment
  */
 type Msg struct {
-	fromId int
-	toId int
-	event Event
+	originId int
+	action Action
+}
+func (msg Msg) String() string{
+	return fmt.Sprintf("Msg: originId(%v) action(%v)", msg.originId, msg.action.String())
 }
 
 func debug(s string){
@@ -160,13 +141,14 @@ func min(a, b int) int{
 		return a
 	}
 }
+
 func getCommitIndex(matchIndex map[int]int, majorityCount int) int{
-	matchings := []int{}
+	matchIndices := []int{}
 	for _, v := range matchIndex {
-		matchings = append(matchings, v)
+		matchIndices = append(matchIndices, v)
 	}
-	sort.Ints(matchings)
-	return matchings[majorityCount-1]
+	sort.Sort(sort.Reverse(sort.IntSlice(matchIndices)))		//StackOverflow, I love you
+	return matchIndices[majorityCount-1]
 }
 
 func NewSm(_state State, _id int, _peers []int) StateMachine{
@@ -178,7 +160,7 @@ func NewSm(_state State, _id int, _peers []int) StateMachine{
 	case LEADER:
 		sm = StateMachine{id:_id, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:0,lastApplied:0, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:_state, votes:make(map[int]bool),peers:_peers, majorityCount:_majorityCount}
 		for _, peerId := range sm.peers {
-			sm.matchIndex[peerId] = 1
+			sm.matchIndex[peerId] = 0
 			sm.nextIndex[peerId] = 1
 			sm.lastSent[peerId] = 0
 		}
@@ -270,15 +252,42 @@ func (sm *StateMachine) handleTimeout() []Action{
 	}
 	return actions
 }
+//Only for FOLLOWER and CANDIDATE states
+func (sm *StateMachine) updateCommitIndex(leaderCommit int) []Action{
+	oldCommitIndex := sm.commitIndex
+	actions := []Action{}
+	if leaderCommit > sm.commitIndex {
+		sm.commitIndex = min(leaderCommit, len(sm.log))
+		//Accordingly LogStore action
+		for ; oldCommitIndex < sm.commitIndex; {
+			oldCommitIndex += 1
+			action1 :=  Commit{index:oldCommitIndex, data:sm.log[oldCommitIndex-1].data, err:nil}
+			actions = append(actions, action1)
+			action2 := LogStore{index:oldCommitIndex, data:sm.log[oldCommitIndex-1].data}
+			actions = append(actions, action2)
+		}
+	}
+	return actions
 
+}
 func (sm *StateMachine) handleAppendEntriesReqGeneric(fromId int,term int, leaderId int, prevLogIndex int, prevLogTerm int, entries []LogEntry, leaderCommit int) []Action{
 	prevLogIndex -= 1 			//Log Index according to spec start at 1
 	actions := []Action{}
-	if term >= sm.currTerm && len(sm.log) > prevLogIndex && sm.log[prevLogIndex].term == prevLogTerm {
+	if len(sm.log) == 0{
+		for _,entry := range entries {
+			sm.log = append(sm.log, entry)
+
+		}
+		sm.lastApplied = max(sm.lastApplied, len(sm.log))
+		actions = sm.updateCommitIndex(leaderCommit)
+		action := Send{peerId:fromId, event:AppendEntriesRespEv{term:sm.currTerm, success:true}}
+		actions = append(actions, action)
+
+	}else if term >= sm.currTerm && len(sm.log) > prevLogIndex && sm.log[prevLogIndex].term == prevLogTerm {
 		if entries != nil {
 			sm.currTerm = term                //Check
 			for _,entry := range entries {
-				if len(sm.log) - 1 < prevLogIndex {
+				if len(sm.log) - 1 <= prevLogIndex {
 					//append the entry to log
 					sm.log = append(sm.log, entry)
 				}else {
@@ -286,20 +295,13 @@ func (sm *StateMachine) handleAppendEntriesReqGeneric(fromId int,term int, leade
 					sm.log[prevLogIndex + 1] = entry
 				}
 				sm.lastApplied = max(sm.lastApplied, prevLogIndex + 1)
-				oldCommitIndex := sm.commitIndex
-				if leaderCommit > sm.commitIndex {
-					sm.commitIndex = min(leaderCommit, len(sm.log))
-					//Accordingly LogStore action
-					for ; oldCommitIndex < sm.commitIndex; {
-						action := LogStore{index:oldCommitIndex - 1, data:sm.log[oldCommitIndex - 1].data}
-						actions = append(actions, action)
-						oldCommitIndex += 1
-					}
-				}
 			}
 		}
+		actions = sm.updateCommitIndex(leaderCommit)
+		action := Send{peerId:fromId, event:AppendEntriesRespEv{term:sm.currTerm, success:true}}
+		actions = append(actions, action)
 	}else{
-		action := AppendEntriesRespEv{term:sm.currTerm, success:false}
+		action := Send{peerId:fromId, event:AppendEntriesRespEv{term:sm.currTerm, success:false}}
 		actions = append(actions, action)
 	}
 	return actions
@@ -315,8 +317,6 @@ func (sm *StateMachine) handleAppendEntriesReq(fromId int,term int, leaderId int
 			}
 			actions = sm.handleAppendEntriesReqGeneric(fromId, term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit)
 		case LEADER:
-			//Should not receive one, except when there are two leaders at the time of transition(addition/deletion of new node). Yet to handle later case
-			//TODO
 			if term > sm.currTerm {
 				sm.changeToFollower()
 				actions = sm.handleAppendEntriesReqGeneric(fromId, term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit)
@@ -325,7 +325,7 @@ func (sm *StateMachine) handleAppendEntriesReq(fromId int,term int, leaderId int
 	return actions
 }
 
-func (sm *StateMachine) handleAppendEntriesResp(_peerId int, term int, success bool) []Action{
+func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bool) []Action{
 	actions := []Action{}
 	switch sm.state{
 		case FOLLOWER:
@@ -334,38 +334,39 @@ func (sm *StateMachine) handleAppendEntriesResp(_peerId int, term int, success b
 			//Will never get one ;-)
 		case LEADER:
 			if success == false {
-				sm.nextIndex[_peerId] -= sm.lastSent[_peerId]
-				_prevLogIndex := sm.nextIndex[_peerId]-1
+				sm.nextIndex[fromId] -= sm.lastSent[fromId]
+				_prevLogIndex := sm.nextIndex[fromId]-1
 				_prevLogTerm := sm.log[_prevLogIndex-1].term	//'Coz log is initialized at 1 according to spec
-				_entries := []LogEntry{sm.log[sm.nextIndex[_peerId]-1]}
-				action := Send{peerId:_peerId, event:AppendEntriesReqEv{term:sm.currTerm, leaderId: sm.id,prevLogIndex:_prevLogIndex,prevLogTerm:_prevLogTerm, entries:_entries, leaderCommit:sm.commitIndex}}
+				_entries := []LogEntry{sm.log[sm.nextIndex[fromId]-1]}
+				action := Send{peerId:fromId, event:AppendEntriesReqEv{term:sm.currTerm, leaderId: sm.id,prevLogIndex:_prevLogIndex,prevLogTerm:_prevLogTerm, entries:_entries, leaderCommit:sm.commitIndex}}
 				actions = append(actions, action)
 			}else{
-				sm.matchIndex[_peerId] += sm.lastSent[_peerId]
+				sm.matchIndex[fromId] += sm.lastSent[fromId]
+				sm.nextIndex[fromId] += sm.lastSent[fromId]
 				newCommitIndex := getCommitIndex(sm.matchIndex, sm.majorityCount)
 				if newCommitIndex > sm.commitIndex && sm.log[newCommitIndex-1].term == sm.currTerm {
 					oldCommitIndex := sm.commitIndex
 					sm.commitIndex = newCommitIndex
 					for ;oldCommitIndex < sm.commitIndex; {
+						oldCommitIndex += 1
 						action1 :=  Commit{index:oldCommitIndex, data:sm.log[oldCommitIndex-1].data, err:nil}
 						actions = append(actions, action1)
 						action2 := LogStore{index:oldCommitIndex, data:sm.log[oldCommitIndex-1].data}
 						actions = append(actions, action2)
-						oldCommitIndex += 1
 					}
 				}
-				if sm.nextIndex[_peerId] <= sm.lastApplied {
-					_prevLogIndex := sm.nextIndex[_peerId]-1
+				if sm.nextIndex[fromId] <= sm.lastApplied {
+					_prevLogIndex := sm.nextIndex[fromId]-1
 					_prevLogTerm := sm.log[_prevLogIndex-1].term	//'Coz log is initialized at 1 according to spec
 					_entries := []LogEntry{}
-					idx := sm.nextIndex[_peerId]
+					idx := sm.nextIndex[fromId]
 					for ;idx <= sm.lastApplied;{
 						entry := LogEntry{term:sm.log[idx-1].term, data:sm.log[idx-1].data}	//Directly copy it
 						_entries = append(_entries, entry)
 						idx += 1
 					}
-					action := Send{_peerId, AppendEntriesReqEv{term:sm.currTerm, leaderId:sm.id,prevLogIndex:_prevLogIndex,prevLogTerm:_prevLogTerm, entries:_entries, leaderCommit:sm.commitIndex}}
-					sm.lastSent[_peerId] = len(_entries)
+					action := Send{fromId, AppendEntriesReqEv{term:sm.currTerm, leaderId:sm.id,prevLogIndex:_prevLogIndex,prevLogTerm:_prevLogTerm, entries:_entries, leaderCommit:sm.commitIndex}}
+					sm.lastSent[fromId] = len(_entries)
 					actions = append(actions, action)
 
 				}
@@ -435,17 +436,19 @@ func (sm *StateMachine) handleAppend(_data []byte) []Action{
 			sm.log = append(sm.log, entry)
 			lastLogIndex := len(sm.log)
 			sm.lastApplied = lastLogIndex
-			actions := []Action{}
-			_entries := []LogEntry{}
 			for _, _peerId :=  range sm.peers{
+				_entries := []LogEntry{}
 				if sm.nextIndex[_peerId] <= sm.lastApplied{
 					_prevLogIndex := sm.nextIndex[_peerId]-1
-					_prevLogTerm := sm.log[_prevLogIndex-1].term	//'Coz log is initialized at 1 according to spec
 					idx := sm.nextIndex[_peerId]
 					for ;idx <= lastLogIndex ; {
 						entry := LogEntry{term:sm.log[idx-1].term, data:sm.log[idx-1].data}
 						_entries = append(_entries, entry)
 						idx += 1
+					}
+					_prevLogTerm := 0
+					if _prevLogIndex != 0 {
+						_prevLogTerm = sm.log[_prevLogIndex-1].term
 					}
 					action := Send{peerId:_peerId, event:AppendEntriesReqEv{term:sm.currTerm,leaderId:sm.id,prevLogIndex: _prevLogIndex,prevLogTerm:_prevLogTerm, entries:_entries, leaderCommit:sm.commitIndex}}
 					sm.lastSent[_peerId] = len(_entries)
@@ -456,7 +459,7 @@ func (sm *StateMachine) handleAppend(_data []byte) []Action{
 	return actions
 }
 //fromId : 0 for client
-func (sm *StateMachine) ProcessEvent (fromId int,ev Event) []Action{
+func (sm *StateMachine) processEvent (fromId int,ev Event) []Action{
 	actions := []Action{}
 	switch ev.(type) {
 		case AppendEntriesReqEv:
@@ -492,5 +495,24 @@ func (sm *StateMachine) ProcessEvent (fromId int,ev Event) []Action{
 
 func main(){
 	rand.Seed(time.Now().UTC().UnixNano())
+	sm3 := NewSm(LEADER, 3, []int{1,2})
+	actions := sm3.processEvent(0, AppendEv{data:[]byte("first")})
+	fmt.Println(len(actions))
+	for _, action := range actions {
+		switch action.(type){
+		case Send:
+			actObj := action.(Send)
+			fmt.Println(actObj.String())
+		case Commit:
+			actObj := action.(Commit)
+			fmt.Println(actObj.String())
+		case LogStore:
+			actObj := action.(LogStore)
+			fmt.Println(actObj.String())
+		case Alarm:
+			actObj := action.(LogStore)
+			fmt.Println(actObj.String())
+		}
+	}
 }
 
