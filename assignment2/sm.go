@@ -335,6 +335,7 @@ func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bo
 		case LEADER:
 			if success == false {
 				sm.nextIndex[fromId] -= sm.lastSent[fromId]
+				sm.lastSent[fromId] = 0
 				_prevLogIndex := sm.nextIndex[fromId]-1
 				_prevLogTerm := sm.log[_prevLogIndex-1].term	//'Coz log is initialized at 1 according to spec
 				_entries := []LogEntry{sm.log[sm.nextIndex[fromId]-1]}
@@ -343,6 +344,7 @@ func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bo
 			}else{
 				sm.matchIndex[fromId] += sm.lastSent[fromId]
 				sm.nextIndex[fromId] += sm.lastSent[fromId]
+				sm.lastSent[fromId] = 0
 				newCommitIndex := getCommitIndex(sm.matchIndex, sm.majorityCount)
 				if newCommitIndex > sm.commitIndex && sm.log[newCommitIndex-1].term == sm.currTerm {
 					oldCommitIndex := sm.commitIndex

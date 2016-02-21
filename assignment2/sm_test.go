@@ -61,13 +61,16 @@ func formMsgs(actions []Action, _originId int) []Msg{
  * Continue this until there are no more actions
  * Meanwhile, store all the RPC calls and actions generated in msgLog and actionLog
  */
-func playSendAndLogRest(msgs []Msg, smMap SmMap, actionLog *SystemLog, msgLog *SystemLog){
+func processSendAndLogRest(msgs []Msg, smMap SmMap, actionLog *SystemLog, msgLog *SystemLog, processSend bool){
 	resp_msgs := []Msg{}
 	for {
 		for _, msg := range msgs {
 			msgLog.add(fmt.Sprintf("%v", msg))
 			switch msg.action.(type){
 			case Send:
+				if !processSend {
+					continue
+				}
 				actObj := msg.action.(Send)
 				smPtr, found := smMap[actObj.peerId]
 				if found{
@@ -113,13 +116,13 @@ func TestAppend(t *testing.T){
 
 	actions := smMap[3].processEvent(0, AppendEv{data:[]byte("first")})
 	msgs := formMsgs(actions, 3)
-	playSendAndLogRest(msgs, smMap, &actionLog, &msgLog)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, true)
 	actions = sm3.processEvent(0, AppendEv{data:[]byte("second")})
 	msgs = formMsgs(actions, 3)
-	playSendAndLogRest(msgs, smMap, &actionLog, &msgLog)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, true)
 	actions = sm3.processEvent(0, AppendEv{data:[]byte("third")})
 	msgs = formMsgs(actions, 3)
-	playSendAndLogRest(msgs, smMap, &actionLog, &msgLog)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, true)
 
 	//actionLog.print()
 	//msgLog.print()
@@ -170,4 +173,141 @@ func TestAppend(t *testing.T){
 	expectedMsgLog.add("Msg: originId(3) action(LogStore:idx(3) data(third))")
 
 	expect(t, msgLog.getAll(), expectedMsgLog.getAll())
+}
+
+func TestLeaderTimeout(t *testing.T) {
+	smMap := make(SmMap)
+	smMap[1] = &StateMachine{id:1, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2,lastApplied:2, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:FOLLOWER, votes:make(map[int]bool),peers:[]int{2,3}, majorityCount:2}
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("third")})
+
+	smMap[2] = &StateMachine{id:2, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2,lastApplied:2, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:FOLLOWER, votes:make(map[int]bool),peers:[]int{1,3}, majorityCount:2}
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("third")})
+
+	smMap[3] = &StateMachine{id:3, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2,lastApplied:3, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:LEADER, votes:make(map[int]bool),peers:[]int{1,2}, majorityCount:2}
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("third")})
+
+	(*(smMap[3])).nextIndex[1] = 4
+	(*(smMap[3])).nextIndex[2] = 4
+	(*(smMap[3])).matchIndex[1] = 3
+	(*(smMap[3])).matchIndex[2] = 3
+	(*(smMap[3])).lastSent[1] = 0
+	(*(smMap[3])).lastSent[2] = 0
+
+	//fmt.Println(smMap[1])
+	//fmt.Println(smMap[2])
+	//fmt.Println(smMap[3])
+
+	actions := smMap[3].processEvent(0, TimeoutEv{})
+
+	expectedActions := []Action{}
+	log := []LogEntry{}
+	log = append(log, LogEntry{term:0, data:[]byte{}})
+	expectedActions = append(expectedActions, Send{peerId:1, event:AppendEntriesReqEv{term:0, leaderId:3, prevLogIndex:2, prevLogTerm:0, entries:log, leaderCommit:2}})
+	expectedActions = append(expectedActions, Send{peerId:2, event:AppendEntriesReqEv{term:0, leaderId:3, prevLogIndex:2, prevLogTerm:0, entries:log, leaderCommit:2}})
+	expectedActions = append(expectedActions, Alarm{duration:heartBeatTimeout})
+
+	expect(t, fmt.Sprintf("%v", actions), fmt.Sprintf("%v", expectedActions))
+}
+
+func TestFollowerTimeout(t *testing.T) {
+	smMap := make(SmMap)
+	smMap[1] = &StateMachine{id:1, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2,lastApplied:2, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:FOLLOWER, votes:make(map[int]bool),peers:[]int{2,3}, majorityCount:2}
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("third")})
+
+	smMap[2] = &StateMachine{id:2, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2,lastApplied:2, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:FOLLOWER, votes:make(map[int]bool),peers:[]int{1,3}, majorityCount:2}
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("third")})
+
+	smMap[3] = &StateMachine{id:3, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2,lastApplied:3, nextIndex:make(map[int]int), matchIndex:make(map[int]int),lastSent:make(map[int]int), state:LEADER, votes:make(map[int]bool),peers:[]int{1,2}, majorityCount:2}
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("third")})
+
+	(*(smMap[3])).nextIndex[1] = 4
+	(*(smMap[3])).nextIndex[2] = 4
+	(*(smMap[3])).matchIndex[1] = 3
+	(*(smMap[3])).matchIndex[2] = 3
+	(*(smMap[3])).lastSent[1] = 0
+	(*(smMap[3])).lastSent[2] = 0
+
+	//fmt.Println(smMap[1])
+	//fmt.Println(smMap[2])
+	//fmt.Println(smMap[3])
+
+	actionLog := SystemLog{}
+	msgLog := SystemLog{}
+
+	actions := smMap[1].processEvent(0, TimeoutEv{})
+	msgs := formMsgs(actions, 1)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, true)
+
+	expectedMsgLog := SystemLog{}
+	expectedMsgLog.add("Msg: originId(1) action(Send:peerId(2) event(VoteReqEv:term(1) cadidateId(1) lastLogIndex(2) lastLogTerm(0)))")
+	expectedMsgLog.add("Msg: originId(1) action(Send:peerId(3) event(VoteReqEv:term(1) cadidateId(1) lastLogIndex(2) lastLogTerm(0)))")
+	expectedMsgLog.add("Msg: originId(1) action(Alarm:duration(21))")
+	expectedMsgLog.add("Msg: originId(2) action(Send:peerId(1) event(VoteRespEv:term(0) voteGranted(true)))")
+	expectedMsgLog.add("Msg: originId(3) action(Send:peerId(1) event(VoteRespEv:term(0) voteGranted(false)))")
+	expectedMsgLog.add("Msg: originId(1) action(Send:peerId(2) event(AppendEntriesReqEv:term(1) leaderId(1) prevLogIndex(2) prevLogTerm(0) entries([1:]) leaderCommit(2)))")
+	expectedMsgLog.add("Msg: originId(1) action(Send:peerId(3) event(AppendEntriesReqEv:term(1) leaderId(1) prevLogIndex(2) prevLogTerm(0) entries([1:]) leaderCommit(2)))")
+	expectedMsgLog.add("Msg: originId(1) action(Alarm:duration(10))")
+	expectedMsgLog.add("Msg: originId(2) action(Send:peerId(1) event(AppendEntriesRespEv:term(1) success(true)))")
+	expectedMsgLog.add("Msg: originId(3) action(Send:peerId(1) event(AppendEntriesRespEv:term(1) success(true)))")
+	expect(t, fmt.Sprintf("%v", msgLog.getAll()), fmt.Sprintf("%v", expectedMsgLog.getAll()))
+
+}
+
+func TestCandidateTimeout(t *testing.T) {
+	smMap := make(SmMap)
+	smMap[1] = &StateMachine{id:1, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2, lastApplied:2, nextIndex:make(map[int]int), matchIndex:make(map[int]int), lastSent:make(map[int]int), state:FOLLOWER, votes:make(map[int]bool), peers:[]int{2, 3}, majorityCount:2}
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[1])).log = append((*(smMap[1])).log, LogEntry{term:0, data:[]byte("third")})
+
+	smMap[2] = &StateMachine{id:2, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2, lastApplied:2, nextIndex:make(map[int]int), matchIndex:make(map[int]int), lastSent:make(map[int]int), state:FOLLOWER, votes:make(map[int]bool), peers:[]int{1, 3}, majorityCount:2}
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[2])).log = append((*(smMap[2])).log, LogEntry{term:0, data:[]byte("third")})
+
+	smMap[3] = &StateMachine{id:3, currTerm:0, votedFor:-1, log:[]LogEntry{}, commitIndex:2, lastApplied:3, nextIndex:make(map[int]int), matchIndex:make(map[int]int), lastSent:make(map[int]int), state:LEADER, votes:make(map[int]bool), peers:[]int{1, 2}, majorityCount:2}
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("first")})
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("second")})
+	(*(smMap[3])).log = append((*(smMap[3])).log, LogEntry{term:0, data:[]byte("third")})
+
+	(*(smMap[3])).nextIndex[1] = 4
+	(*(smMap[3])).nextIndex[2] = 4
+	(*(smMap[3])).matchIndex[1] = 3
+	(*(smMap[3])).matchIndex[2] = 3
+	(*(smMap[3])).lastSent[1] = 0
+	(*(smMap[3])).lastSent[2] = 0
+
+	actionLog := SystemLog{}
+	msgLog := SystemLog{}
+
+	actions := smMap[1].processEvent(0, TimeoutEv{})
+	msgs := formMsgs(actions, 1)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, false)		//Candidate will not hear back from peers
+	expect(t, "1 0 2", fmt.Sprintf("%v %v %v", smMap[1].state, smMap[2].state, smMap[3].state))	//Candidate Follower Leader
+
+	actions = smMap[2].processEvent(0, TimeoutEv{})
+	msgs = formMsgs(actions, 2)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, false)		//Candidate will not hear back from peers
+	expect(t, "1 1 2", fmt.Sprintf("%v %v %v", smMap[1].state, smMap[2].state, smMap[3].state))	//Candidate Candidate Leader
+
+	actions = smMap[2].processEvent(0, TimeoutEv{})
+	msgs = formMsgs(actions, 2)
+	processSendAndLogRest(msgs, smMap, &actionLog, &msgLog, true)
+	expect(t, "0 2 0", fmt.Sprintf("%v %v %v", smMap[1].state, smMap[2].state, smMap[3].state))	//Follower Leader Follower
+	expect(t, "2 2 2", fmt.Sprintf("%v %v %v", smMap[1].currTerm, smMap[2].currTerm, smMap[3].currTerm))
+
+	//actionLog.print()
+	//msgLog.print()
 }
