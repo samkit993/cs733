@@ -5,26 +5,6 @@ import (
 	"math/rand"
 	"time"
 )
-/*
--	Currently this contains incomplete implementation for state machine. This is done for first check point instead of writing pseudcode. Might contain lot of typos as well.
-
--	Data structures used:
-		LogEntry: 	For storing term and data pair in log
-		EntryInfo:	Stores additional commit information about log entry
-
--	Following variables are used in StateMachine struct in addition to state variables of specification
-		currState int				//0: Follower	1:Candidate		2:Leader
-		votes int					//Relevant to candidate state
-		logInfo map[int]EntryInfo	//logIndex:logEntryInfo is relevant to leader state
-		timeOutPeriod int			//In miliseconds
-
--	TODO:
-		1.	Need to define Msg and Action struct properly
-		2.	Need to figure out where to place fail case of Commit outputcase
-		3.	Clueless about where to place Alarm output action
-		4.	And lot of others small technicalities/doubts need to be resolved
-		5.	Main event loop and channel mechanism
-*/
 type State int
 
 const (
