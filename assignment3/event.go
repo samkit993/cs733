@@ -16,46 +16,49 @@ func (to TimeoutEv) String() string{
 }
 
 type AppendEntriesReqEv struct {
-	term int
-	leaderId int
-	prevLogIndex int
-	prevLogTerm int
-	entries Log
-	leaderCommit int
+	FromId       int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Updates      LogUpdate
+	LeaderCommit int
 }
 func (aer AppendEntriesReqEv) String() string{
-	return fmt.Sprintf("AppendEntriesReqEv:term(%v) leaderId(%v) prevLogIndex(%v) prevLogTerm(%v) entries(%v) leaderCommit(%v)",aer.term, aer.leaderId, aer.prevLogIndex, aer.prevLogTerm, aer.entries.String(), aer.leaderCommit)
+	return fmt.Sprintf("AppendEntriesReqEv:fromId(%d) term(%v) leaderId(%v) prevLogIndex(%v) prevLogTerm(%v) entries(%v) leaderCommit(%v)",aer.FromId, aer.Term, aer.LeaderId, aer.PrevLogIndex, aer.PrevLogTerm, aer.Updates.String(), aer.LeaderCommit)
 }
 
 type AppendEntriesRespEv struct {
-	term int
-	success bool
+	FromId  int
+	Term    int
+	Success bool
 }
 func (aer AppendEntriesRespEv) String() string{
-	return fmt.Sprintf("AppendEntriesRespEv:term(%v) success(%v)", aer.term, aer.success)
+	return fmt.Sprintf("AppendEntriesRespEv:fromId(%v) term(%v) success(%v)",aer.FromId, aer.Term, aer.Success)
 }
 
 type VoteReqEv struct {
-	term int
-	candidateId int
-	lastLogIndex int
-	lastLogTerm int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 func (vr VoteReqEv) String() string{
-	return fmt.Sprintf("VoteReqEv:term(%v) cadidateId(%v) lastLogIndex(%v) lastLogTerm(%v)", vr.term, vr.candidateId, vr.lastLogIndex, vr.lastLogTerm)
+	return fmt.Sprintf("VoteReqEv:term(%v) cadidateId(%v) lastLogIndex(%v) lastLogTerm(%v)", vr.Term, vr.CandidateId, vr.LastLogIndex, vr.LastLogTerm)
 }
 
 type VoteRespEv struct {
-	term int
-	voteGranted bool
+	FromId      int
+	Term        int
+	VoteGranted bool
 }
 func (vr VoteRespEv) String() string{
-	return fmt.Sprintf("VoteRespEv:term(%v) voteGranted(%v)", vr.term, vr.voteGranted)
+	return fmt.Sprintf("VoteRespEv:fromId(%v) term(%v) voteGranted(%v)",vr.FromId, vr.Term, vr.VoteGranted)
 }
 
 type AppendEv struct {
-	data []byte
+	Data []byte
 }
 func (ae AppendEv) String() string{
-	return fmt.Sprintf("AppendEv:data(%v)", string(ae.data))
+	return fmt.Sprintf("AppendEv:data(%v)", string(ae.Data))
 }

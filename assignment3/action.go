@@ -27,11 +27,11 @@ func (action Action) String() string{
 }
 */
 type Send struct {
-	peerId int
-	event Event
+	PeerId int
+	Event  Event
 }
 func (s Send) String() string{
-	return fmt.Sprintf("Send:peerId(%v) event(%v)",s.peerId, s.event)
+	return fmt.Sprintf("Send:peerId(%v) event(%v)",s.PeerId, s.Event)
 }
 
 type Commit struct {
@@ -57,4 +57,14 @@ type LogStore struct {
 
 func (l LogStore) String() string{
 	return fmt.Sprintf("LogStore:idx(%v) data(%v)",l.index, string(l.data))
+}
+
+type StateStore struct {
+	currTerm int
+	votedFor int
+	log		 Log
+}
+
+func (s StateStore) String() string{
+	return fmt.Sprintf("StateStore:currTerm(%v) votedFor(%v) log(%v)", s.currTerm, s.votedFor, s.log.String())
 }
