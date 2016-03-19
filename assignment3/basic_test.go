@@ -60,4 +60,7 @@ func TestBasic(t *testing.T){
 		}
 		expect(t, fmt.Sprintf("%v",node.sm.commitIndex), "2")
 	}
+	for _, node := range rafts {
+		node.Shutdown()
+	}
 }

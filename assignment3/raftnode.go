@@ -33,6 +33,7 @@ type Message struct{
 type RaftNode struct{
 	eventCh chan Event
 	commitCh chan *CommitInfo
+	quitCh chan bool
 	timer *time.Timer
 	sm StateMachine
 	server cluster.Server
@@ -63,7 +64,7 @@ func NewRaftNode(state State, id int,clusterConfigFileName string, logFileName s
 
 	_sm,alarm := NewSm(state, id, srvr.Peers(), hbTimeout, timeout)
 
-	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
+	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), quitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
 	rn.timer = time.NewTimer(time.Millisecond * time.Duration(alarm.duration))
 
 	go rn.Listen()
@@ -93,8 +94,6 @@ type Node interface {
 	Shutdown()
 }
 
-
-
 func (rn *RaftNode) Id() int{
 	return rn.server.Pid()
 }
@@ -122,6 +121,14 @@ func (rn *RaftNode) Append(_data []byte){
 		debug(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Sending ", ldrId))
 		rn.server.Outbox() <- &cluster.Envelope{Pid:ldrId, MsgId:1, Msg:msg}
 	}
+}
+
+func (rn *RaftNode) Shutdown(){
+	rn.timer.Stop()
+	rn.quitCh <- true
+	rn.mainLog.Close()
+	rn.stateLog.Close()
+	rn.server.Close()
 }
 
 func (rn *RaftNode) doActions(actions []Action) {
@@ -172,6 +179,8 @@ func (rn *RaftNode) Listen(){
 				//fmt.Printf("Node Id(%v) State(%v) Listen.ReceivedMsg(%v)\n",rn.Id(), rn.sm.state, env.Msg)
 				msgObj :=  env.Msg.(Message)
 				rn.eventCh <- msgObj.SendAct.Event 
+			case <- rn.quitCh:
+				return
 		}
 	}
 }
@@ -187,6 +196,8 @@ func (rn *RaftNode) processEvents() {
 				debug(fmt.Sprintf("Node Id(%v) leaderId(%v) State(%v)-------------processEvents(%v)\n",rn.Id(), rn.LeaderId(), rn.sm.state, ev))
 				actions := rn.sm.processEvent(ev)
 				rn.doActions(actions)
+			case <- rn.quitCh:
+				return
 		}
 
 	}
