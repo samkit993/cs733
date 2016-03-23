@@ -382,7 +382,6 @@ func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bo
 				sm.nextIndex[fromId] += sm.lastSent[fromId]
 				sm.lastSent[fromId] = 0
 				newCommitIndex := getCommitIndex(sm.matchIndex, sm.majorityCount)
-				debug(fmt.Sprintf("newCommitIndex(%d), %v\n", newCommitIndex, sm))
 				if newCommitIndex > sm.commitIndex && sm.log[newCommitIndex-1].Term == sm.currTerm {
 					oldCommitIndex := sm.commitIndex
 					sm.commitIndex = newCommitIndex
@@ -513,30 +512,21 @@ func (sm *StateMachine) processEvent (ev Event) []Action{
 		case AppendEntriesReqEv:
 			evObj := ev.(AppendEntriesReqEv)
 			actions = sm.handleAppendEntriesReq(evObj.FromId, evObj.Term, evObj.LeaderId, evObj.PrevLogIndex, evObj.PrevLogTerm, evObj.Updates, evObj.LeaderCommit)
-			debug(fmt.Sprintf("%v\n", evObj))
 		case AppendEntriesRespEv:
 			evObj := ev.(AppendEntriesRespEv)
 			actions = sm.handleAppendEntriesResp(evObj.FromId, evObj.Term, evObj.Success)
-			debug(fmt.Sprintf("%v\n", evObj))
 		case VoteReqEv:
 			evObj := ev.(VoteReqEv)
 			actions = sm.handleVoteReq(evObj.Term, evObj.CandidateId, evObj.LastLogIndex, evObj.LastLogTerm)
-			debug(fmt.Sprintf("%v\n", evObj))
 		case VoteRespEv:
 			evObj := ev.(VoteRespEv)
-            //fmt.Printf("********fromId(%v) evObj.fromId(%d) sm.id(%v)\n", fromId, evObj.fromId, sm.id)
 			actions = sm.handleVoteResp(evObj.FromId,evObj.Term, evObj.VoteGranted)
-			debug(fmt.Sprintf("%v\n", evObj))
 		case TimeoutEv:
-			evObj := ev.(TimeoutEv)
-            //fmt.Printf("********fromId(%v) evObj.fromId(%d) sm.id(%v)\n", fromId, evObj.fromId, sm.id)
+			//evObj := ev.(TimeoutEv)
 			actions = sm.handleTimeout()
-			debug(fmt.Sprintf("%v\n", evObj))
 		case AppendEv:
 			evObj := ev.(AppendEv)
 			actions = sm.handleAppend(evObj.Data)
-			debug(fmt.Sprintf("%v\n", evObj))
-		// other cases
 		default:
 			println ("Unrecognized")
 	}

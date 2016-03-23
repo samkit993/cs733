@@ -7,11 +7,6 @@ import (
 	"github.com/cs733-iitb/log"
 )
 
-func debug(s string){
-	if false{
-		fmt.Println(s)
-	}
-}
 
 type CommitInfo struct{
 	Data []byte
@@ -33,12 +28,14 @@ type Message struct{
 type RaftNode struct{
 	eventCh chan Event
 	commitCh chan *CommitInfo
-	quitCh chan bool
+	listenQuitCh chan bool
+	processQuitCh chan bool
 	timer *time.Timer
 	sm StateMachine
 	server cluster.Server
 	mainLog *log.Log
 	stateLog *log.Log
+	stateIdx int
 }
 
 func NewRaftNode(state State, id int,clusterConfigFileName string, logFileName string, hbTimeout int, timeout int) (*RaftNode, error){
@@ -64,7 +61,7 @@ func NewRaftNode(state State, id int,clusterConfigFileName string, logFileName s
 
 	_sm,alarm := NewSm(state, id, srvr.Peers(), hbTimeout, timeout)
 
-	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), quitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
+	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), listenQuitCh:make(chan bool), processQuitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
 	rn.timer = time.NewTimer(time.Millisecond * time.Duration(alarm.duration))
 
 	go rn.Listen()
@@ -123,9 +120,19 @@ func (rn *RaftNode) Append(_data []byte){
 	}
 }
 
+/* Shuts down raft cleanly
+ *   Stops listen go routine and then waits for 10 ms to get existing events processed
+ *   Then stops processEvent go routine and closes all three channels
+ *   Atlast, call close method of logs and servers
+ */
 func (rn *RaftNode) Shutdown(){
 	rn.timer.Stop()
-	rn.quitCh <- true
+	rn.listenQuitCh <- true
+	time.Sleep(10*time.Millisecond)		//Wait, so that all messages are processed 
+	rn.processQuitCh <- true
+	close(rn.eventCh)
+	close(rn.listenQuitCh)
+	close(rn.processQuitCh)
 	rn.mainLog.Close()
 	rn.stateLog.Close()
 	rn.server.Close()
@@ -158,6 +165,7 @@ func (rn *RaftNode) doActions(actions []Action) {
 			}
 		case StateStore:
 			actObj := action.(StateStore)
+			rn.stateLog.TruncateToEnd(0)
 			err := rn.stateLog.Append(StateInfo{CurrTerm:actObj.currTerm, VotedFor:actObj.votedFor,  Log:actObj.log})
 			if err != nil {
 				panic(err)
@@ -179,7 +187,7 @@ func (rn *RaftNode) Listen(){
 				//fmt.Printf("Node Id(%v) State(%v) Listen.ReceivedMsg(%v)\n",rn.Id(), rn.sm.state, env.Msg)
 				msgObj :=  env.Msg.(Message)
 				rn.eventCh <- msgObj.SendAct.Event 
-			case <- rn.quitCh:
+			case <- rn.listenQuitCh:
 				return
 		}
 	}
@@ -196,7 +204,7 @@ func (rn *RaftNode) processEvents() {
 				debug(fmt.Sprintf("Node Id(%v) leaderId(%v) State(%v)-------------processEvents(%v)\n",rn.Id(), rn.LeaderId(), rn.sm.state, ev))
 				actions := rn.sm.processEvent(ev)
 				rn.doActions(actions)
-			case <- rn.quitCh:
+			case <- rn.processQuitCh:
 				return
 		}
 
