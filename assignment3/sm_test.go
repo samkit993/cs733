@@ -270,4 +270,3 @@ func TestCandidateTimeout(t *testing.T) {
 	//actionLog.print()
 	//msgLog.print()
 }
-

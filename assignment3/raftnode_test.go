@@ -8,9 +8,9 @@ import (
 	"github.com/cs733-iitb/cluster"
 	"math/rand"
 )
-
+var Debug bool =  false
 func debug(s string){		//Dirty debug switch
-	if true{
+	if Debug{
 		fmt.Println(s)
 	}
 }
@@ -77,7 +77,7 @@ func TestBasic(t *testing.T){
 			expect(t,string(ci.Data), "foo") 						
 		}
 		expect(t, fmt.Sprintf("%v",node.sm.commitIndex), "2")		//StateMachine's update of commitIndex tested
-		fmt.Printf("%v\n, mainLog.LastIndex(%v) stateLog.LastIndex(%v)\n", node.sm.String(), node.mainLog.GetLastIndex(), node.stateLog.GetLastIndex())
+		debug(fmt.Sprintf("%v\n, mainLog.LastIndex(%v) stateLog.LastIndex(%v)\n", node.sm.String(), node.mainLog.GetLastIndex(), node.stateLog.GetLastIndex()))
 		
 		//Testing LogStore 
 		iface, err := node.mainLog.Get(0) 
