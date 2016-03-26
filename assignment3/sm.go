@@ -188,7 +188,7 @@ func (sm *StateMachine) changeToFollower() []Action{
 func (sm *StateMachine) startElection() []Action{
 	sm.currTerm += 1
 	sm.votedFor = sm.id
-    //sm.leaderId = -1
+    sm.leaderId = -1
 	sm.votes[sm.id] = true
 	var _lastLogIndex, _lastLogTerm int
 	if(len(sm.log) == 0){
@@ -206,7 +206,6 @@ func (sm *StateMachine) startElection() []Action{
 	action := StateStore{currTerm:sm.currTerm, votedFor:sm.votedFor, log:sm.log}
 	actions = append(actions, action)
 	action1 := Alarm{duration:(sm.timeout + rand.Intn(sm.timeout))}
-	debug(fmt.Sprintf("##########sm.id(%v) leaderId(%d) timeout(%d)\n", sm.id, sm.leaderId, action1.duration))
 	actions = append(actions,action1)
 	return actions
 }
@@ -233,7 +232,7 @@ func (sm *StateMachine) sendHeartBeats() []Action{
 	actions := []Action{}
 	for _, _peerId :=  range sm.peers {
         action := Send{PeerId:_peerId, Event:AppendEntriesReqEv{FromId:sm.id, Term:sm.currTerm, LeaderId:sm.id, PrevLogIndex:_prevLogIndex, PrevLogTerm:_prevLogTerm, Updates:_updates, LeaderCommit:sm.commitIndex}}			//Sending Heartbeat
-		sm.lastSent[_peerId] = 0
+		//sm.lastSent[_peerId] = 0						//This is not required. Because, it might happen that before receiving resp for previous actual append, leader times out. In that case, it would overwrite the actual lastSent and would lead to not updation of matchIndex, nextIndex and commitIndex
 		actions = append(actions, action)
 	}
 	action := Alarm{duration:sm.heartBeatTimeout}
@@ -262,14 +261,16 @@ func (sm *StateMachine) changeToLeader() []Action{
 
 func (sm *StateMachine) handleTimeout() []Action{
 	actions := []Action{}
+	debug(fmt.Sprintf("Node Id:%d State:%d LeaderId:%d\n", sm.id, sm.state, sm.leaderId))
 	switch sm.state{
         //If voted for noone then, become candidate
 		case FOLLOWER:
 			if sm.votedFor == -1 {
 				actions = sm.changeToCandidate()
+			}else{
+				sm.votedFor = -1
 			}
 		case CANDIDATE:
-			debug(fmt.Sprintf("TIMEDOUT\n"))
 			actions = sm.startElection()
 		case LEADER:
 			actions = sm.sendHeartBeats()
@@ -314,15 +315,18 @@ func (sm *StateMachine) handleAppendEntriesReqGeneric(fromId int,term int, leade
 			}
 		}
 		sm.lastApplied = max(sm.lastApplied, len(sm.log))
-        	sm.leaderId = leaderId
+		sm.leaderId = leaderId
 		actions = sm.updateCommitIndex(leaderCommit)
-        	action := Send{PeerId:fromId, Event:AppendEntriesRespEv{FromId:sm.id, Term:sm.currTerm, Success:true}}
+		action := Send{PeerId:fromId, Event:AppendEntriesRespEv{FromId:sm.id, Term:sm.currTerm, Success:true}}
 		actions = append(actions, action)
 
 		action_ := StateStore{currTerm:sm.currTerm, votedFor:sm.votedFor, log:sm.log}
 		actions = append(actions, action_)
+
+		alarm := Alarm{duration:sm.timeout + rand.Intn(sm.timeout)}
+		actions = append(actions, alarm)
 	}else{
-        	action := Send{PeerId:fromId, Event:AppendEntriesRespEv{FromId:sm.id, Term:sm.currTerm, Success:false}}
+		action := Send{PeerId:fromId, Event:AppendEntriesRespEv{FromId:sm.id, Term:sm.currTerm, Success:false}}
 		actions = append(actions, action)
 	}
 	return actions
@@ -333,7 +337,7 @@ func (sm *StateMachine) handleAppendEntriesReq(fromId int,term int, leaderId int
 		case FOLLOWER:
 			actions = sm.handleAppendEntriesReqGeneric(fromId, term, leaderId, prevLogIndex, prevLogTerm, updates, leaderCommit)
 		case CANDIDATE:
-			if term > sm.currTerm {
+			if term >= sm.currTerm {
 				actions = append(actions, sm.changeToFollower()...)
 			}
 			actions = append(actions, sm.handleAppendEntriesReqGeneric(fromId, term, leaderId, prevLogIndex, prevLogTerm, updates, leaderCommit)...)
@@ -363,7 +367,7 @@ func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bo
 					sm.nextIndex[fromId] -= sm.lastSent[fromId]
 					_idx = min(len(sm.log), sm.nextIndex[fromId])
 					_prevLogIndex = _idx-1
-					fmt.Printf("_prevLogIndex(%v) sm.id(%v) fromId(%v) nextIndex(%v) lastSend(%v) matchIndex(%v) log(%v)\n", _prevLogTerm, sm.id, fromId, sm.nextIndex,sm.lastSent, sm.matchIndex, sm.log)
+					debug(fmt.Sprintf("_prevLogIndex(%v) sm.id(%v) fromId(%v) nextIndex(%v) lastSend(%v) matchIndex(%v) log(%v)\n", _prevLogTerm, sm.id, fromId, sm.nextIndex,sm.lastSent, sm.matchIndex, sm.log))
 					if(_prevLogIndex == 0){
 						_prevLogTerm = 0
 					}else{
@@ -378,9 +382,11 @@ func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bo
 					actions = append(actions, action)
 				}
 			}else{
+				debug(fmt.Sprintf("1===================Id(%v) matchIndex(%v) nextIndex(%v) lastSent(%v)\n", sm.id, sm.matchIndex, sm.nextIndex, sm.lastSent))
 				sm.matchIndex[fromId] += sm.lastSent[fromId]
 				sm.nextIndex[fromId] += sm.lastSent[fromId]
 				sm.lastSent[fromId] = 0
+				debug(fmt.Sprintf("1===================Id(%v) matchIndex(%v) nextIndex(%v) lastSent(%v)\n", sm.id, sm.matchIndex, sm.nextIndex, sm.lastSent))
 				newCommitIndex := getCommitIndex(sm.matchIndex, sm.majorityCount)
 				if newCommitIndex > sm.commitIndex && sm.log[newCommitIndex-1].Term == sm.currTerm {
 					oldCommitIndex := sm.commitIndex
@@ -497,9 +503,11 @@ func (sm *StateMachine) handleAppend(_data []byte) []Action{
 					}
                     action := Send{PeerId:_peerId, Event:AppendEntriesReqEv{FromId:sm.id, Term:sm.currTerm, LeaderId:sm.id, PrevLogIndex: _prevLogIndex, PrevLogTerm:_prevLogTerm, Updates:_updates, LeaderCommit:sm.commitIndex}}
 					sm.lastSent[_peerId] = len(_updates)
+					debug(fmt.Sprintf("UPDATES len : %v\n", len(_updates)))
 					actions = append(actions, action)
 				}
 			}
+			debug(fmt.Sprintf("Id(%v) lastSent(%v)\n", sm.id, sm.lastSent))
 			action_ := StateStore{currTerm:sm.currTerm, votedFor:sm.votedFor, log:sm.log}
 			actions = append(actions, action_)
 	}

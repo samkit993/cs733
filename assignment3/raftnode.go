@@ -3,7 +3,9 @@ import (
 	"fmt"
 	"time"
 	"os"
+	"sync"
 	"github.com/cs733-iitb/cluster"
+	"github.com/cs733-iitb/cluster/mock"
 	"github.com/cs733-iitb/log"
 )
 
@@ -26,6 +28,7 @@ type Message struct{
 }
 
 type RaftNode struct{
+	sync.Mutex
 	eventCh chan Event
 	commitCh chan *CommitInfo
 	listenQuitCh chan bool
@@ -38,7 +41,7 @@ type RaftNode struct{
 	stateIdx int
 }
 
-func NewRaftNode(state State, id int,clusterConfigFileName string, logFileName string, hbTimeout int, timeout int) (*RaftNode, error){
+func NewRN(state State, id int,clusterConfigFileName string, logFileName string, hbTimeout int, timeout int) (*RaftNode, error){
     os.RemoveAll(logFileName)
     os.RemoveAll(logFileName + "_state")
 	srvr,err  := cluster.New(id, clusterConfigFileName)
@@ -60,6 +63,33 @@ func NewRaftNode(state State, id int,clusterConfigFileName string, logFileName s
     _stateLog.RegisterSampleEntry(StateInfo{})
 
 	_sm,alarm := NewSm(state, id, srvr.Peers(), hbTimeout, timeout)
+
+	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), listenQuitCh:make(chan bool), processQuitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
+	rn.timer = time.NewTimer(time.Millisecond * time.Duration(alarm.duration))
+
+	go rn.Listen()
+	go rn.processEvents()
+	return &rn, err
+}
+
+func NewMockRN(state State, srvr *mock.MockServer, logFileName string, hbTimeout int, timeout int) (*RaftNode, error){
+    os.RemoveAll(logFileName)
+    os.RemoveAll(logFileName + "_state")
+
+	_mainLog,err := log.Open(logFileName)
+	if err != nil{
+		return nil, err
+	}
+
+	_stateLog,err := log.Open(logFileName + "_state")
+	if err != nil{
+		return nil, err
+	}
+
+    _mainLog.RegisterSampleEntry([]byte{})
+    _stateLog.RegisterSampleEntry(StateInfo{})
+
+	_sm,alarm := NewSm(state, srvr.Pid(), srvr.Peers(), hbTimeout, timeout)
 
 	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), listenQuitCh:make(chan bool), processQuitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
 	rn.timer = time.NewTimer(time.Millisecond * time.Duration(alarm.duration))
@@ -115,7 +145,7 @@ func (rn *RaftNode) Append(_data []byte){
 			return
 		}
 		msg := Message{OriginId:rn.Id(),  SendAct:Send{PeerId:ldrId, Event:AppendEv{Data:_data}}}
-		debug(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Sending ", ldrId))
+		debug(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Sending to %v", ldrId))
 		rn.server.Outbox() <- &cluster.Envelope{Pid:ldrId, MsgId:1, Msg:msg}
 	}
 }
@@ -207,7 +237,6 @@ func (rn *RaftNode) processEvents() {
 			case <- rn.processQuitCh:
 				return
 		}
-
 	}
 }
 
