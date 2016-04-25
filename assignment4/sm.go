@@ -4,13 +4,12 @@ import (
 	"sort"
 	"bytes"
 	"math/rand"
-    "os"
 )
 
 var DebugSm = false 
 func debugSm(s string){
 	if DebugSm{
-		fmt.Fprintf(os.Stderr,s)
+		fmt.Printf(s)
 	}
 }
 
@@ -498,7 +497,6 @@ func (sm *StateMachine) handleAppendEntriesResp(fromId int, term int, success bo
 				sm.nextIndex[fromId] += nEntries 
 				//debugSm(fmt.Sprintf("2===================Id(%v) fromId(%v) matchIndex(%v) nextIndex(%v) nEntries(%v)\n", sm.id, fromId, sm.matchIndex, sm.nextIndex, nEntries))
 				sm.matchIndex[fromId] = min(len(sm.log), max(sm.matchIndex[fromId],lastLogIndex))
-                sm.nextIndex[fromId] = sm.matchIndex[fromId] + 1
 				newCommitIndex := getCommitIndex(sm.matchIndex, sm.majorityCount)
 				if newCommitIndex > sm.commitIndex && sm.log[newCommitIndex-1].Term == sm.currTerm {
 					oldCommitIndex := sm.commitIndex

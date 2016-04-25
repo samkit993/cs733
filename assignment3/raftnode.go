@@ -2,13 +2,20 @@ package main
 import (
 	"fmt"
 	"time"
-	"os"
 	"sync"
+    "os"
+	"encoding/gob"
 	"github.com/cs733-iitb/cluster"
 	"github.com/cs733-iitb/cluster/mock"
 	"github.com/cs733-iitb/log"
 )
 
+var DebugRaft bool = false 
+func debugRaft(str string){
+	if DebugRaft{
+		fmt.Fprintf(os.Stderr, "!!!!!!!!!%v\n",str)
+	}
+}
 
 type CommitInfo struct{
 	Data []byte
@@ -24,26 +31,44 @@ type StateInfo struct {
 
 type Message struct{
 	OriginId int
-	SendAct Send
+	SendActn SendAction
 }
 
 type RaftNode struct{
-	sync.Mutex
-	eventCh chan Event
+	appendCh chan Event
 	commitCh chan *CommitInfo
-	listenQuitCh chan bool
 	processQuitCh chan bool
+	isOn bool
 	timer *time.Timer
+	
 	sm StateMachine
+	smLock sync.RWMutex
+
 	server cluster.Server
+
 	mainLog *log.Log
+	mainLogLock sync.RWMutex
+
 	stateLog *log.Log
+	stateLogLock sync.RWMutex
+
 	stateIdx int
 }
 
+func registerStructs(){
+	gob.Register(cluster.Envelope{})
+	gob.Register(SendAction{})
+	gob.Register(Message{})
+	gob.Register(AppendEv{})
+	gob.Register(AppendEntriesReqEv{})
+	gob.Register(AppendEntriesRespEv{})
+	gob.Register(VoteReqEv{})
+	gob.Register(VoteRespEv{})
+}
+
 func NewRN(state State, id int,clusterConfigFileName string, logFileName string, hbTimeout int, timeout int) (*RaftNode, error){
-    os.RemoveAll(logFileName)
-    os.RemoveAll(logFileName + "_state")
+	//TODO Add code for recovery
+	registerStructs()
 	srvr,err  := cluster.New(id, clusterConfigFileName)
 	if err != nil{
 		return nil, err
@@ -59,22 +84,21 @@ func NewRN(state State, id int,clusterConfigFileName string, logFileName string,
 		return nil, err
 	}
 
-    _mainLog.RegisterSampleEntry([]byte{})
-    _stateLog.RegisterSampleEntry(StateInfo{})
+	_mainLog.RegisterSampleEntry([]byte{})
+	_stateLog.RegisterSampleEntry(StateInfo{})
 
 	_sm,alarm := NewSm(state, id, srvr.Peers(), hbTimeout, timeout)
 
-	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), listenQuitCh:make(chan bool), processQuitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
+	rn := RaftNode{appendCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), processQuitCh:make(chan bool, 1),isOn:true, sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
 	rn.timer = time.NewTimer(time.Millisecond * time.Duration(alarm.duration))
 
-	go rn.Listen()
-	go rn.processEvents()
+	go rn.handleEvent()
 	return &rn, err
 }
 
 func NewMockRN(state State, srvr *mock.MockServer, logFileName string, hbTimeout int, timeout int) (*RaftNode, error){
-    os.RemoveAll(logFileName)
-    os.RemoveAll(logFileName + "_state")
+	//TODO Add code for recovery
+    registerStructs()
 
 	_mainLog,err := log.Open(logFileName)
 	if err != nil{
@@ -86,38 +110,31 @@ func NewMockRN(state State, srvr *mock.MockServer, logFileName string, hbTimeout
 		return nil, err
 	}
 
-    _mainLog.RegisterSampleEntry([]byte{})
-    _stateLog.RegisterSampleEntry(StateInfo{})
+	_mainLog.RegisterSampleEntry([]byte{})
+	_stateLog.RegisterSampleEntry(StateInfo{})
 
 	_sm,alarm := NewSm(state, srvr.Pid(), srvr.Peers(), hbTimeout, timeout)
 
-	rn := RaftNode{eventCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), listenQuitCh:make(chan bool), processQuitCh:make(chan bool), sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
+	rn := RaftNode{appendCh:make(chan Event, 1000), commitCh:make(chan *CommitInfo, 1000), processQuitCh:make(chan bool),isOn:true, sm:_sm, server:srvr, mainLog:_mainLog, stateLog:_stateLog}
 	rn.timer = time.NewTimer(time.Millisecond * time.Duration(alarm.duration))
 
-	go rn.Listen()
-	go rn.processEvents()
+	go rn.handleEvent()
 	return &rn, err
 }
 
 type Node interface {
 	Append([]byte)
 
-	//A channel for client to listen on. What goes into Append must come out of here at some point
 	CommitChannel() chan *CommitInfo
 
-	//Last known committed index in the log. This could be -1 untill the system stabilizes
 	CommitedIndex() int
 
-	//Returns the data at a log index or an error
 	Get(index int) (err error, data []byte)
 
-	//Node's id
 	Id()
 
-	//Id of leader,-1 if unknown
 	LeaderId() int
 
-	//Signal to shut down all goroutines, stop sockets, flush log and close it, cancel timers
 	Shutdown()
 }
 
@@ -134,74 +151,72 @@ func (rn *RaftNode) CommitChannel() chan *CommitInfo{
 }
 
 func (rn *RaftNode) Append(_data []byte){
-	if rn.Id() == rn.LeaderId(){
-        rn.eventCh <- AppendEv{Data: _data}
+	rid := rn.Id()
+	rn.smLock.RLock()
+	defer rn.smLock.RUnlock()
+	if rid == rn.LeaderId(){
+        rn.appendCh <- AppendEv{Data: _data}
 	}else{
 		//Send this append request to leader
 		ldrId := rn.LeaderId()	
 		if ldrId == -1{
 			//CHECK 
-			debug(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Returning"))
+			debugRaft(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Returning"))
 			return
 		}
-		msg := Message{OriginId:rn.Id(),  SendAct:Send{PeerId:ldrId, Event:AppendEv{Data:_data}}}
-		debug(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Sending to %v", ldrId))
+		msg := Message{OriginId:rid,  SendActn:SendAction{PeerId:ldrId, Event:AppendEv{Data:_data}}}
+		debugRaft(fmt.Sprintf("%%%%%%%%%%%%%%%%%%%%%%%%%%Append Sending to %v", ldrId))
 		rn.server.Outbox() <- &cluster.Envelope{Pid:ldrId, MsgId:1, Msg:msg}
 	}
 }
 
-/* Shuts down raft cleanly
- *   Stops listen go routine and then waits for 10 ms to get existing events processed
- *   Then stops processEvent go routine and closes all three channels
- *   Atlast, call close method of logs and servers
+/*   Shuts down raftnode cleanly
  */
 func (rn *RaftNode) Shutdown(){
-	rn.timer.Stop()
-	rn.listenQuitCh <- true
-	time.Sleep(10*time.Millisecond)		//Wait, so that all messages are processed 
 	rn.processQuitCh <- true
-	close(rn.eventCh)
-	close(rn.listenQuitCh)
-	close(rn.processQuitCh)
-	rn.mainLog.Close()
-	rn.stateLog.Close()
-	rn.server.Close()
 }
 
 func (rn *RaftNode) doActions(actions []Action) {
+	rid := rn.Id()
 	for _, action := range actions{
-		debug(fmt.Sprintf("Node Id(%v) leaderId(%v) State(%v)++++++++++++++++doActions(%v)\n",rn.Id(),rn.LeaderId(), rn.sm.state, action))
+		if !rn.isOn {
+			break
+		}
 		switch action.(type){
-		case Send:
-			actObj := action.(Send)
-			msg := Message{OriginId:rn.Id(), SendAct:actObj}
+		case SendAction:
+			actObj := action.(SendAction)
+			msg := Message{OriginId:rid, SendActn:actObj}
 			rn.server.Outbox() <- &cluster.Envelope{Pid:actObj.PeerId, MsgId:2, Msg:msg}
-		case Commit:
-			actObj := action.(Commit)
+		case CommitAction:
+			actObj := action.(CommitAction)
 			rn.commitCh <- &CommitInfo{Index:actObj.index, Data:actObj.data, Err:actObj.err}
-		case LogStore:
-			actObj := action.(LogStore)
+		case LogStoreAction:
+			actObj := action.(LogStoreAction)
+			rn.mainLogLock.Lock()
+			defer rn.mainLogLock.Unlock()
 			li := int(rn.mainLog.GetLastIndex())
-			if li == actObj.index - 2{			//In raft log index starts at 1
+			if li == actObj.index - 2{			//In raft statemachine log index starts at 1
+				//debugRaft(fmt.Sprintf("LogStoreAction:\"if \" NodeId:%v mainLogIndex:%v stateMachineIndex-2:%v\n",rid, li, actObj.index-2))
 				rn.mainLog.Append(actObj.data)
 			}else if(li < actObj.index - 2){
-				//return error
-			}else{
+				//debugRaft(fmt.Sprintf("LogStoreAction: \"else if \" NodeId:%v mainLogIndex:%v stateMachineIndex-2:%v\n",rid, li, actObj.index-2))
+                os.Exit(1)
+			}else{	//Actual Log is greater than statmachine log
+				//debugRaft(fmt.Sprintf("LogStoreAction: \"else\" NodeId:%v mainLogIndex:%v stateMachineIndex-2:%v\n",rid, li, actObj.index-2))
 				err := rn.mainLog.TruncateToEnd(int64(actObj.index-2))
 				err = rn.mainLog.Append(actObj.data)
 				if err != nil {
 					panic(err)
 				}
 			}
-		case StateStore:
-			actObj := action.(StateStore)
+		case StateStoreAction:
+			actObj := action.(StateStoreAction)
+			rn.stateLogLock.Lock()
 			rn.stateLog.TruncateToEnd(0)
-			err := rn.stateLog.Append(StateInfo{CurrTerm:actObj.currTerm, VotedFor:actObj.votedFor,  Log:actObj.log})
-			if err != nil {
-				panic(err)
-			}
-		case Alarm:
-			actObj := action.(Alarm)
+			rn.stateLog.Append(StateInfo{CurrTerm:actObj.currTerm, VotedFor:actObj.votedFor,  Log:actObj.log})
+			rn.stateLogLock.Unlock()
+		case AlarmAction:
+			actObj := action.(AlarmAction)
 			set := rn.timer.Reset(time.Duration(actObj.duration)* time.Millisecond)
 			if !set{
 				rn.timer = time.NewTimer(time.Duration(actObj.duration)* time.Millisecond)
@@ -210,31 +225,39 @@ func (rn *RaftNode) doActions(actions []Action) {
 	}
 }
 
-func (rn *RaftNode) Listen(){
-	for {
-		select{
-			case env := <- rn.server.Inbox():
-				//fmt.Printf("Node Id(%v) State(%v) Listen.ReceivedMsg(%v)\n",rn.Id(), rn.sm.state, env.Msg)
-				msgObj :=  env.Msg.(Message)
-				rn.eventCh <- msgObj.SendAct.Event 
-			case <- rn.listenQuitCh:
-				return
-		}
-	}
-}
-
-func (rn *RaftNode) processEvents() {
+func (rn *RaftNode) handleEvent() {
+	rid := rn.Id()
 	for {
 		select {
-			case <- rn.timer.C:
-				debug(fmt.Sprintf("Node Id(%v) leaderId(%v) State(%v)-------------processEvents(timeout)\n",rn.Id(), rn.LeaderId(), rn.sm.state))
+			case  <- rn.timer.C:
+				debugRaft(fmt.Sprintf("NodeId:%v State(%v)-------------handleEvent(timeout) 1\n",rid, rn.sm.state))
+				rn.smLock.Lock()
 				actions := rn.sm.processEvent(TimeoutEv{})
+				rn.smLock.Unlock()
 				rn.doActions(actions)
-			case ev := <- rn.eventCh:
-				debug(fmt.Sprintf("Node Id(%v) leaderId(%v) State(%v)-------------processEvents(%v)\n",rn.Id(), rn.LeaderId(), rn.sm.state, ev))
+			case ev := <- rn.appendCh:
+				debugRaft(fmt.Sprintf("NodeId:%v State(%v)-------------handleEvent(%v) 1\n",rid, rn.sm.state, ev))
+				rn.smLock.Lock()
 				actions := rn.sm.processEvent(ev)
+				rn.smLock.Unlock()
+				rn.doActions(actions)
+			case env := <- rn.server.Inbox():
+				msgObj :=  env.Msg.(Message)
+				debugRaft(fmt.Sprintf("NodeId:%v State(%v)-------------handleEvent(%v)\n",rid,rn.sm.state, msgObj.SendActn.Event))
+				rn.smLock.Lock()
+				actions := rn.sm.processEvent(msgObj.SendActn.Event)
+				rn.smLock.Unlock()
 				rn.doActions(actions)
 			case <- rn.processQuitCh:
+				rn.timer.Stop()
+				rn.server.Close()
+				time.Sleep(1*time.Second)
+				rn.isOn = false
+				close(rn.processQuitCh)
+				close(rn.appendCh)
+				rn.mainLog.Close()
+				rn.stateLog.Close()
+				debugRaft(fmt.Sprintf("NodeId:%d handleEvent returned\n", rn.Id()))
 				return
 		}
 	}

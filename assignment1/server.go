@@ -9,43 +9,221 @@ import (
 	"io/ioutil"
 	"sync"
 	"time"
+    "errors"
 )
+var DebugServer bool = true //Turn on/off debugServer statements 
 
-var mapMutex = struct{
-	sync.RWMutex
-	vmap map[string]int64
-	emap map[string]int64
-	tmap map[string]time.Time
-}{vmap: make(map[string]int64), emap: make(map[string]int64), tmap: make(map[string]time.Time)}
-
-var flag int = 0	//Turn on/off debug statements 
-
-func debug(s string){
-	if flag == 1 {
+func debugServer(s string){
+	if DebugServer {
 		fmt.Println(s)
 	}
 }
 
-func checkExpiry(limit int64, stampedtime time.Time) bool {
-	r := time.Duration(limit)*time.Millisecond
-	exptime := time.Now().Add(r)
-	if exptime.Sub(time.Now()) > time.Nanosecond {
-		return false
-	}else{
-		return true
-	}
+type FileMap struct{
+    sync.RWMutex
+    dict map[string]*fileStruct
 }
 
-
-func deleteFile(){
-
+type fileStruct struct{
+    version int64 
+    exptime time.Time
+    contents []byte
 }
+
+func (fs *fileStruct) String() string{
+    s := fmt.Sprintf("version(%v) exptime(%v) contents(%v)", fs.version, fs.exptime, fs.contents)
+    return s
+}
+
+var fileMap = &FileMap{dict:make(map[string]*fileStruct, 1000)}
 
 func printErr(err error){
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal error: %s", err.Error())
 		os.Exit(1)
 	}
+}
+
+var cmderr = errors.New("ERR_CMD_ERR")
+var verserr = errors.New("ERR_VERSION") 
+var fnferr = errors.New("ERR_FILE_NOT_FOUND") 
+var interr = errors.New("ERR_INTERNAL") 
+
+func handleCas(firstline string, conn net.Conn, reader *bufio.Reader) error{
+    commands := strings.Fields(firstline)
+    filename := commands[1]
+    if len(commands) < 4 {
+        debugServer("Compare and swap: insufficient arguments\n")
+        fmt.Fprintf(conn, "%v \r\n", cmderr)
+        conn.Close()
+        return cmderr
+    }
+    vers,err := strconv.ParseInt(commands[2], 10, 64)
+    if err != nil {
+        fmt.Fprintf(conn, "%v \r\n", cmderr)
+        conn.Close()
+        return cmderr
+    }
+
+    numbytes,err := strconv.ParseInt(commands[3], 10, 64)
+    if err != nil {
+        fmt.Fprintf(conn, "%v \r\n", cmderr)
+        conn.Close()
+        return cmderr
+    }
+
+    var exptime int64 = -1
+    if len(commands) == 5 {
+        exptime,err = strconv.ParseInt(commands[4], 10, 64)
+        if err != nil {
+            fmt.Fprintf(conn, "%v \r\n", cmderr)
+            conn.Close()
+            return cmderr 
+        }
+    }
+
+    var content = make([]byte,numbytes+2)
+    n, ok := reader.Read(content)
+    if len(content) != n{
+        debugServer(fmt.Sprintf("Number of bytes %v not equal to length of content %v in CAS\n", n, len(content)))
+    }
+    fileMap.RLock()
+    curr := fileMap.dict[filename].version
+    if curr != vers {
+        fileMap.RUnlock()
+        fmt.Fprintf(conn, "%v %v \r\n",verserr, curr)
+        return verserr
+    }
+    const modePerm os.FileMode = 0755
+    ok = ioutil.WriteFile(filename,  content, modePerm)
+    if ok != nil {
+        fileMap.RUnlock()
+        fmt.Fprintf(conn, "%v \r\n", interr)
+        return interr
+    }
+    fileMap.dict[filename].version = curr +1	
+    fileMap.dict[filename].exptime = time.Now().Add(time.Duration(exptime)*time.Millisecond)
+    fileMap.RUnlock()
+    fmt.Fprintf(conn,"OK %v \r\n", curr+1)
+    return nil
+}
+
+func handleRead(firstline string, conn net.Conn) error{
+    fmt.Println(firstline)
+    tokens := strings.Fields(firstline)
+    filename := tokens[1]
+    if len(tokens) != 2 {
+        debugServer(fmt.Sprintf("Read: number of arguments:%d", len(tokens)))
+        fmt.Fprintf(conn,"%v \r\n", cmderr)
+        conn.Close()
+        return cmderr
+    }
+    fileMap.RLock()
+    _, present := fileMap.dict[filename] 
+    if !present {
+        fmt.Fprintf(conn,"%v \r\n", fnferr)
+		fileMap.RUnlock()
+        return fnferr
+    }
+    vers :=  fileMap.dict[filename].version
+    expirytime := fileMap.dict[filename].exptime
+    fileMap.RUnlock()
+
+    expired := !(expirytime.Sub(time.Now()) > time.Nanosecond)
+    fmt.Printf("filename:%v version:%v exptime:%v time.Now():%v expired:%v\n", filename, vers, expirytime,time.Now(), expired)
+    if expired {
+        fmt.Fprintf(conn,"%v \r\n", fnferr)
+        _ = os.Remove(filename)
+        fileMap.Lock()
+        delete(fileMap.dict, filename)
+        fileMap.Unlock()
+        return fnferr
+    }
+
+    content, ok := ioutil.ReadFile(filename)
+    if ok != nil {
+        fmt.Fprintf(conn,"%v \r\n", fnferr)
+        return fnferr
+    }
+    fmt.Fprintf(conn,"CONTENTS %v %v %v  \r\n",vers, len(content)-2, expirytime)
+    conn.Write(content)
+    return nil
+}
+
+func handleWrite(firstline string, conn net.Conn, reader *bufio.Reader) error{
+    tokens := strings.Fields(firstline)
+    filename := tokens[1]
+    if len(tokens) < 3 {
+        debugServer(fmt.Sprintf("Read: number of arguments:%d", len(tokens)))
+        fmt.Fprintf(conn,"%v \r\n", cmderr)
+        conn.Close()
+        return cmderr
+    }
+    numbytes,err := strconv.ParseInt(tokens[2], 10, 64)
+    if err != nil {
+        fmt.Fprintf(conn,"%v \r\n", cmderr)
+        conn.Close()
+        return cmderr
+    }
+    var expirytime int64 = -1
+    if len(tokens) == 4 {
+        expirytime,err = strconv.ParseInt(tokens[3], 10, 64)
+        if err != nil {
+            fmt.Fprintf(conn,"%v \r\n", cmderr)
+            conn.Close()
+            return cmderr
+        }
+    }
+    var content = make([]byte,numbytes+2)
+    n, ok := reader.Read(content)
+    if len(content) != n{
+        debugServer(fmt.Sprintf("Number of bytes %v not equal to length of content %v in Write\n", n, len(content)))
+    }
+	debugServer(fmt.Sprintf("In write: contents received:%v\n", string(content)))
+    fileMap.Lock()
+	debugServer(fmt.Sprintf("fileMap locked\n"))
+    var vers int64 = 0
+    if _, present := fileMap.dict[filename]; present {
+        vers = fileMap.dict[filename].version + 1
+    }
+	debugServer(fmt.Sprintf("Version:%v\n", vers))
+    const modePerm os.FileMode = 0755
+    ok = ioutil.WriteFile(filename,  content, modePerm)
+    if ok != nil {
+        fileMap.Unlock()
+        fmt.Fprintf(conn,"%v \r\n", interr)
+        return interr
+    }
+    fileMap.dict[filename] = &fileStruct{}
+    fileMap.dict[filename].exptime = time.Now().Add(time.Duration(expirytime)*time.Millisecond)
+    fileMap.dict[filename].version = vers
+    fmt.Printf("Write filename(%v) version(%v) exptime(%v)\n", filename, fileMap.dict[filename].version, fileMap.dict[filename].exptime)
+    fileMap.Unlock()
+    fmt.Fprintf(conn,"OK %v  \r\n", vers)
+    return nil
+}
+
+func handleDelete(firstline string, conn net.Conn) error{
+	tokens := strings.Fields(firstline)
+	filename := tokens[1]
+	if len(tokens) != 2 {
+		debugServer(fmt.Sprintf("Read: number of arguments:%d", len(tokens)))
+		fmt.Fprintf(conn,"%v \r\n", cmderr)
+		conn.Close()
+		return cmderr
+	}
+
+	err := os.Remove(filename)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		fmt.Fprintf(conn,"%v \r\n", interr)
+		return interr
+	}
+	fileMap.Lock()
+	delete(fileMap.dict, filename)
+	fileMap.Unlock()
+	fmt.Fprintf(conn,"OK \r\n")
+	return nil
 }
 
 func handleSocket(conn net.Conn){
@@ -58,8 +236,8 @@ func handleSocket(conn net.Conn){
 			return
 		}
 
-		str := string(buf)
-		commands := strings.Fields(str)
+		firstline := string(buf)
+		commands := strings.Fields(firstline)
 		//fmt.Println(commands, len(commands))
 		command := commands[0]
 		if len(commands) < 2 {
@@ -67,176 +245,23 @@ func handleSocket(conn net.Conn){
 			conn.Close()
 			return
 		}
-		filename := commands[1]
-		debug(fmt.Sprintf("command:%v", command))
+		debugServer(fmt.Sprintf("command:%v", command))
 		
 		switch command {
 			case "cas": {
-				if len(commands) < 4 {
-					debug("Compare and swap: insufficient arguments\n")
-					fmt.Fprintf(conn, "ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-				vers,err := strconv.ParseInt(commands[2], 10, 64)
-				if err != nil {
-					fmt.Fprintf(conn, "ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-
-				numbytes,err := strconv.ParseInt(commands[3], 10, 64)
-				if err != nil {
-					fmt.Fprintf(conn, "ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-
-				var exptime int64 = -1
-				if len(commands) == 5 {
-					exptime,err = strconv.ParseInt(commands[4], 10, 64)
-					if err != nil {
-						fmt.Fprintf(conn, "ERR_CMD_ERR \r\n")
-						conn.Close()
-						return
-					}
-				}
-				var content = make([]byte,numbytes+2)
-				n, ok := reader.Read(content)
-				if len(content) != n{
-					debug(fmt.Sprintf("Number of bytes %v not equal to length of content %v in CAS\n", n, len(content)))
-				}
-				mapMutex.RLock()
-				curr := mapMutex.vmap[filename]
-				if curr != vers {
-					mapMutex.RUnlock()
-					fmt.Fprintf(conn, "ERR_VERSION %v \r\n",curr)
-					continue
-				}
-				const modePerm os.FileMode = 0755
-				ok = ioutil.WriteFile(filename,  content, modePerm)
-				if ok != nil {
-					mapMutex.RUnlock()
-					fmt.Fprintf(conn, "ERR_INTERNAL \r\n")
-					continue
-				}
-				mapMutex.vmap[filename] = curr +1	
-				mapMutex.emap[filename] = exptime
-				mapMutex.RUnlock()
-				fmt.Fprintf(conn,"OK %v \r\n", curr+1)
-
-			}
+                err = handleCas(firstline, conn, reader)
+            }
 			case "read": {
-				if len(commands) != 2 {
-					debug(fmt.Sprintf("Read: number of arguments:%d", len(commands)))
-					fmt.Fprintf(conn,"ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-				mapMutex.RLock()
-				vers, present :=  mapMutex.vmap[filename]
-				if !present {
-					fmt.Fprintf(conn,"ERR_FILE_NOT_FOUND \r\n")
-				}
-				exptime, _ := mapMutex.emap[filename]
-				stime, _ := mapMutex.tmap[filename]
-				mapMutex.RUnlock()
-
-				expired := checkExpiry(exptime, stime)
-				if expired {
-					fmt.Fprintf(conn,"ERR_FILE_NOT_FOUND \r\n")
-					_ = os.Remove(filename)
-					mapMutex.Lock()
-					delete(mapMutex.vmap, filename)
-					delete(mapMutex.emap, filename)
-					delete(mapMutex.tmap, filename)
-					mapMutex.Unlock()
-					continue
-				}
-
-				content, ok := ioutil.ReadFile(filename)
-				if ok != nil {
-					fmt.Fprintf(conn,"ERR_FILE_NOT_FOUND \r\n")
-					continue
-				}
-				fmt.Fprintf(conn,"CONTENTS %v %v %v  \r\n",vers, len(content)-2, exptime)
-				conn.Write(content)
-
+                err = handleRead(firstline, conn)
 			}
 			case "write": {
-				if len(commands) < 3 {
-					debug(fmt.Sprintf("Read: number of arguments:%d", len(commands)))
-					fmt.Fprintf(conn,"ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-				numbytes,err := strconv.ParseInt(commands[2], 10, 64)
-				if err != nil {
-					fmt.Fprintf(conn,"ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-				var exptime int64 = -1
-				if len(commands) == 4 {
-					exptime,err = strconv.ParseInt(commands[3], 10, 64)
-					if err != nil {
-						fmt.Fprintf(conn,"ERR_CMD_ERR \r\n")
-						conn.Close()
-						return
-					}
-				}
-				debug(fmt.Sprintf("In write"))
-				var content = make([]byte,numbytes+2)
-				n, ok := reader.Read(content)
-				if len(content) != n{
-					debug(fmt.Sprintf("Number of bytes %v not equal to length of content %v in Write\n", n, len(content)))
-				}
-				debug(fmt.Sprintf("filename:%v\n", filename))
-				debug(fmt.Sprintf("numbytes:%v\n", numbytes))
-				debug(fmt.Sprintf("exptime:%v\n", exptime))
-				debug(fmt.Sprintf("Content:%v\n", string(content)))
-				mapMutex.Lock()
-				vers , present := mapMutex.vmap[filename]
-				if present {
-					vers += 1
-				}else {
-					vers = 0
-				}
-				const modePerm os.FileMode = 0755
-				ok = ioutil.WriteFile(filename,  content, modePerm)
-				if ok != nil {
-					mapMutex.Unlock()
-					fmt.Fprintf(conn,"ERR_INTERNAL \r\n")
-				continue
-				}
-				mapMutex.emap[filename] = exptime
-				mapMutex.vmap[filename] = vers
-				mapMutex.Unlock()
-				fmt.Fprintf(conn,"OK %v  \r\n", vers)
+				err = handleWrite(firstline, conn, reader)
 			}
-
 			case "delete": {
-				if len(commands) != 2 {
-					debug(fmt.Sprintf("Read: number of arguments:%d", len(commands)))
-					fmt.Fprintf(conn,"ERR_CMD_ERR \r\n")
-					conn.Close()
-					return
-				}
-				err := os.Remove(filename)
-				if err != nil {
-					fmt.Fprintf(conn,"ERR_INTERNAL \r\n")
-					continue
-				}
-				mapMutex.Lock()
-				delete(mapMutex.vmap, filename)
-				delete(mapMutex.emap, filename)
-				delete(mapMutex.tmap, filename)
-				mapMutex.Unlock()
-				fmt.Fprintf(conn,"OK \r\n")
-
+				err = handleDelete(firstline, conn)
 			}
 			default: {
-				debug("Unknown command\n")
+				debugServer("Unknown command\n")
 				fmt.Fprintf(conn,"ERR_CMD_ERR \r\n")
 				conn.Close()
 				return
