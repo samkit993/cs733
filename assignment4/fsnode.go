@@ -540,7 +540,7 @@ func (fsn *FsNode) Append(_data []byte) error{
 }
 
 func (fsn *FsNode) Shutdown(){
-	fmt.Printf("NodeId:%d In shutdown\n", fsn.Id())
+	debugServer(fmt.Sprintf("NodeId:%d In shutdown\n", fsn.Id()))
 	fsn.processQuitCh <- true
 }
 

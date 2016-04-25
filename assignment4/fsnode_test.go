@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DEBUGFSNTEST = true 
+	DEBUGFSNTEST = false 
 	TESTBASIC = false 
 	TESTSEQUENTIAL = false 
 	TESTCONCURRENT = true 
@@ -410,7 +410,7 @@ func TestConcurrent(t *testing.T){
 		
 		for _, node := range fsnodes{
 			node.smLock.RLock()
-			fmt.Printf("Id(%v) LeaderId(%v) LastCommit(%v) IsOne(%v)\n", node.Id(), node.LeaderId(), node.sm.commitIndex, node.isOn)
+			debugFsnTest(fmt.Sprintf("Id(%v) LeaderId(%v) LastCommit(%v) IsOne(%v)\n", node.Id(), node.LeaderId(), node.sm.commitIndex, node.isOn))
 			node.smLock.RUnlock()
 		}
 		running[lid]  = false
@@ -428,7 +428,6 @@ func TestConcurrent(t *testing.T){
 		}
 		new_contents := "Final Contents"
 		newconn := GetConnection(t, fsnodes[newldrId-1].pubaddr)
-		fmt.Println("Connection Got")
 		version := Write(newconn, filename, new_contents, exptime)
 		ReadSuccess(newconn, filename, new_contents, version)
 	}
